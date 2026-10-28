@@ -1,0 +1,50 @@
+services:
+  # PostgreSQL with pgvector extension for relational and vector storage
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: switchyard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: switchyard
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d switchyard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis for fast caching and lightweight job/message brokering
+  redis:
+    image: redis:7-alpine
+    container_name: switchyard-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus for scraping and storing operational metrics
+  prometheus:
+    image: prom/prometheus
+    container_name: switchyard-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+
+volumes:
+  pgdata:
+  redisdata:
+  promdata:
