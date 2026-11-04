@@ -1,0 +1,11 @@
+{
+  "benchmark": "Difficulty Routing vs Single Frontier Baseline",
+  "sample_size": 20,
+  "total_latency_ms": 29641,
+  "routed_cost_usd": 0.05035,
+  "frontier_baseline_cost_usd": 0.095,
+  "cost_savings_usd": 0.04465,
+  "cost_savings_percentage": 47.0,
+  "status": "PASSED",
+  "timestamp": 1793796866.3340783
+}
