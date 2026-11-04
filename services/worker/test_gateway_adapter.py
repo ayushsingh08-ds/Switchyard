@@ -1,6 +1,6 @@
 """Tests for Gateway LLM adapter enforcing routing headers, fencing, and budget limits."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app.agent.gateway_llm import BudgetExceededError, GatewayChatOpenAI
@@ -91,6 +91,26 @@ def _create_mock_chat_completion(
     )
 
 
+def _setup_mock_openai_client(
+    llm: GatewayChatOpenAI,
+    completion: ChatCompletion,
+) -> AsyncMock:
+    """
+    Wire mock completion into both async_client.create and
+    async_client.with_raw_response.create to support both older and newer langchain-openai.
+    """
+    raw_mock = MagicMock()
+    raw_mock.parse.return_value = completion
+    raw_mock.headers = {}
+
+    mock_raw_create = AsyncMock(return_value=raw_mock)
+    mock_create = AsyncMock(return_value=completion)
+
+    llm.async_client.create = mock_create
+    llm.async_client.with_raw_response.create = mock_raw_create
+    return mock_raw_create
+
+
 @pytest.mark.asyncio
 async def test_job_with_tiny_budget_halts_mid_run_with_budget_exceeded():
     """
@@ -114,9 +134,8 @@ async def test_job_with_tiny_budget_halts_mid_run_with_budget_exceeded():
 
     # First call consumes tokens pushing spent_usd past 0.0001
     # 1000 input tokens * 0.00000015 + 500 output tokens * 0.0000006 = 0.00015 + 0.0003 = 0.00045
-    llm.async_client.create = AsyncMock(
-        return_value=_create_mock_chat_completion(tokens_in=1000, tokens_out=500)
-    )
+    completion = _create_mock_chat_completion(tokens_in=1000, tokens_out=500)
+    _setup_mock_openai_client(llm, completion)
 
     config: RunnableConfig = {
         "configurable": {
@@ -166,14 +185,13 @@ async def test_normal_run_records_per_step_costs_in_cost_ledger():
         db=mock_db,
     )
 
-    llm.async_client.create = AsyncMock(
-        return_value=_create_mock_chat_completion(
-            content="Step response",
-            tokens_in=200,
-            tokens_out=100,
-            model="gpt-4o-mini",
-        )
+    completion = _create_mock_chat_completion(
+        content="Step response",
+        tokens_in=200,
+        tokens_out=100,
+        model="gpt-4o-mini",
     )
+    _setup_mock_openai_client(llm, completion)
 
     config: RunnableConfig = {
         "configurable": {
@@ -228,8 +246,8 @@ async def test_gateway_headers_injected_per_call():
         db=mock_db,
     )
 
-    mock_create = AsyncMock(return_value=_create_mock_chat_completion())
-    llm.async_client.create = mock_create
+    completion = _create_mock_chat_completion()
+    mock_raw_create = _setup_mock_openai_client(llm, completion)
 
     config: RunnableConfig = {
         "configurable": {
@@ -243,7 +261,13 @@ async def test_gateway_headers_injected_per_call():
 
     await llm.ainvoke([HumanMessage(content="Diagnose problem")], config=config)
 
-    headers = mock_create.call_args.kwargs.get("extra_headers", {})
+    # Check extra_headers passed to whichever create method was called
+    called_mock = (
+        mock_raw_create
+        if mock_raw_create.call_count > 0
+        else llm.async_client.create
+    )
+    headers = called_mock.call_args.kwargs.get("extra_headers", {})
     assert headers.get("X-Switchyard-Job-Id") == "job-headers-check"
     assert headers.get("X-Switchyard-Tenant-Id") == "tenant-xyz"
     assert headers.get("X-Switchyard-Attempt-Id") == "2"
@@ -271,8 +295,8 @@ async def test_zombie_worker_attempt_rejected_by_gateway():
         db=mock_db,
     )
 
-    mock_create = AsyncMock(return_value=_create_mock_chat_completion())
-    llm.async_client.create = mock_create
+    completion = _create_mock_chat_completion()
+    mock_raw_create = _setup_mock_openai_client(llm, completion)
 
     # Worker 1 (attempt 1) attempts to call LLM gateway
     config: RunnableConfig = {
@@ -289,6 +313,7 @@ async def test_zombie_worker_attempt_rejected_by_gateway():
 
     assert "worker attempt 1 is older than active DB attempt 2" in str(exc_info.value)
     # Ensure no network call was made to the gateway
-    assert mock_create.call_count == 0
+    assert mock_raw_create.call_count == 0
+    assert llm.async_client.create.call_count == 0
     # Ensure no cost ledger entry was written
     assert len(mock_db.cost_ledger_entries) == 0
