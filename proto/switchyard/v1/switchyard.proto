@@ -1,6 +1,0 @@
-# Protocol Buffers definition placeholder
-syntax = "proto3";
-
-package switchyard.v1;
-
-option go_package = "github.com/switchyard/proto/v1;switchyardv1";
