@@ -62,3 +62,45 @@ def get_job(job_id: str) -> dict[str, Any] | None:
             return dict(job) if job else None
     finally:
         conn.close()
+
+
+def get_job_steps(job_id: str) -> list[dict[str, Any]]:
+    """Retrieve all execution steps recorded for a job."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, job_id, attempt_id, step_name, model, tokens_in, tokens_out,
+                       cost_usd, latency_ms, created_at
+                FROM job_steps
+                WHERE job_id = %s
+                ORDER BY created_at ASC
+                """,
+                (job_id,),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_job_ledger(job_id: str) -> list[dict[str, Any]]:
+    """Retrieve all cost ledger entries recorded for a job."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, job_id, attempt_id, step_name, model, tokens_in, tokens_out,
+                       cost_usd, latency_ms, recorded_at
+                FROM cost_ledger
+                WHERE job_id = %s
+                ORDER BY recorded_at ASC
+                """,
+                (job_id,),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
