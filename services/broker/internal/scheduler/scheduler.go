@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/switchyard/services/broker/internal/ratelimit"
+	"github.com/switchyard/services/broker/internal/telemetry"
 	"github.com/switchyard/services/broker/internal/wal"
 )
 
@@ -139,6 +140,8 @@ func (s *Scheduler) LeaseNextJob(ctx context.Context) (*JobRecord, error) {
 		return job, err
 	}
 
+	telemetry.JobsLeasedTotal.Inc()
+
 	// Append lease event to WAL with new attempt_id fencing token
 	if s.wal != nil {
 		walPayload, _ := json.Marshal(map[string]interface{}{
@@ -224,6 +227,7 @@ func (s *Scheduler) reap(ctx context.Context) {
 	}
 
 	for _, job := range reaped {
+		telemetry.LeaseExpiredTotal.Inc()
 		if s.wal != nil {
 			walPayload, _ := json.Marshal(map[string]interface{}{
 				"job_id":     job.ID,

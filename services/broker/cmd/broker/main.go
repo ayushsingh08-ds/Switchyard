@@ -14,6 +14,7 @@ import (
 	"github.com/switchyard/services/broker/internal/ratelimit"
 	"github.com/switchyard/services/broker/internal/scheduler"
 	"github.com/switchyard/services/broker/internal/server"
+	"github.com/switchyard/services/broker/internal/telemetry"
 	"github.com/switchyard/services/broker/internal/wal"
 	brokerpb "github.com/switchyard/services/broker/pkg/pb"
 	"google.golang.org/grpc"
@@ -24,6 +25,7 @@ func main() {
 	walDir := flag.String("wal-dir", "./data/wal", "WAL storage directory")
 	leaseDurMs := flag.Int("lease-ms", 1500, "Lease duration in milliseconds")
 	reaperFreqMs := flag.Int("reaper-ms", 200, "Reaper frequency in milliseconds")
+	metricsPort := flag.Int("metrics-port", 2112, "Prometheus metrics port")
 	flag.Parse()
 
 	log.Printf("Starting Switchyard Broker on port %d...", *port)
@@ -54,6 +56,11 @@ func main() {
 
 	sched.Start(ctx)
 	defer sched.Stop()
+
+	// Start Prometheus metrics server
+	metricsServer := telemetry.StartMetricsServer(fmt.Sprintf(":%d", *metricsPort))
+	defer metricsServer.Close()
+	log.Printf("Metrics server listening on :%d/metrics", *metricsPort)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

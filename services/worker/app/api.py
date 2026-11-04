@@ -1,4 +1,4 @@
-"""FastAPI Ingestion and Query Service for Switchyard Jobs."""
+"""FastAPI Ingestion and Query Service for Switchyard Jobs with W3C Traceparent & Metrics."""
 
 import json
 import os
@@ -6,11 +6,16 @@ import uuid
 from typing import Any
 
 import grpc
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app import db
 from app.pb import broker_pb2, broker_pb2_grpc
+from app.telemetry import (
+    extract_trace_id,
+    format_traceparent,
+    get_prometheus_metrics,
+)
 
 app = FastAPI(title="Switchyard Ingestion API", version="0.1.0")
 
@@ -31,6 +36,7 @@ class JobResponse(BaseModel):
     attempt_id: int
     budget_usd: float
     payload: dict[str, Any] | None = None
+    traceparent: str | None = None
 
 
 def get_broker_client() -> broker_pb2_grpc.BrokerServiceStub:
@@ -40,15 +46,30 @@ def get_broker_client() -> broker_pb2_grpc.BrokerServiceStub:
     return broker_pb2_grpc.BrokerServiceStub(channel)
 
 
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Expose Prometheus scrape endpoint for Python Worker & Ingestion API."""
+    data, content_type = get_prometheus_metrics()
+    return Response(content=data, media_type=content_type)
+
+
 @app.post("/api/v1/jobs", response_model=JobResponse, status_code=201)
-async def create_job(req: JobCreateRequest):
+async def create_job(
+    req: JobCreateRequest,
+    traceparent: str | None = Header(None, alias="traceparent"),
+):
     """
     Enqueue a new job:
-    1. Persist QUEUED/pending state.
-    2. Notify Go Broker via EnqueueJob gRPC.
+    1. Propagate or generate W3C traceparent.
+    2. Persist QUEUED/pending state.
+    3. Notify Go Broker via EnqueueJob gRPC with traceparent in metadata.
     """
     job_id = str(uuid.uuid4())
     payload_str = json.dumps(req.payload)
+
+    # Propagate or create W3C traceparent
+    clean_trace_id = extract_trace_id(traceparent)
+    effective_traceparent = traceparent if clean_trace_id else format_traceparent(uuid.uuid4().hex)
 
     # 1. Try to persist to PostgreSQL, fallback to memory if DB is unavailable
     job_data: dict[str, Any]
@@ -65,7 +86,9 @@ async def create_job(req: JobCreateRequest):
         }
         _in_memory_jobs[job_id] = job_data
 
-    # 2. Call Go Broker EnqueueJob gRPC if reachable
+    job_data["traceparent"] = effective_traceparent
+
+    # 2. Call Go Broker EnqueueJob gRPC with traceparent in gRPC metadata
     try:
         client = get_broker_client()
         grpc_req = broker_pb2.EnqueueRequest(
@@ -73,8 +96,9 @@ async def create_job(req: JobCreateRequest):
             payload_json=payload_str,
             budget_usd=req.budget_usd,
         )
+        metadata = [("traceparent", effective_traceparent)]
         # 1-second timeout to avoid blocking if broker is in mock mode
-        client.EnqueueJob(grpc_req, timeout=1.0)
+        client.EnqueueJob(grpc_req, metadata=metadata, timeout=1.0)
     except Exception:
         # Broker notification logged; job remains queued in database
         pass
@@ -86,6 +110,7 @@ async def create_job(req: JobCreateRequest):
         attempt_id=job_data.get("attempt_id", 0),
         budget_usd=float(job_data.get("budget_usd", req.budget_usd)),
         payload=req.payload,
+        traceparent=effective_traceparent,
     )
 
 
@@ -118,4 +143,5 @@ async def get_job_by_id(job_id: str):
         attempt_id=int(job.get("attempt_id", 0)),
         budget_usd=float(job.get("budget_usd", 0.0)),
         payload=payload,
+        traceparent=job.get("traceparent"),
     )
