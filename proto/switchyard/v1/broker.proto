@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package switchyard.v1;
+
+option go_package = "github.com/switchyard/services/broker/pkg/pb;brokerpb";
+
+// BrokerService manages job ingestion, worker leasing with fencing tokens, and execution lifecycle.
+service BrokerService {
+  // EnqueueJob pushes a new job into the queue for execution.
+  rpc EnqueueJob(EnqueueRequest) returns (EnqueueResponse);
+
+  // LeaseJobs streams job leases to authenticated workers using attempt-based fencing tokens.
+  rpc LeaseJobs(WorkerIdentity) returns (stream JobLease);
+
+  // Heartbeat renews an active lease, returning whether the lease is still valid.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // AckJob marks a job attempt as completed successfully.
+  rpc AckJob(AckRequest) returns (AckResponse);
+
+  // NackJob marks a job attempt as failed, allowing retry or dead-letter handling.
+  rpc NackJob(NackRequest) returns (NackResponse);
+}
+
+// Request to enqueue a new job into Switchyard.
+message EnqueueRequest {
+  string tenant_id = 1;
+  string payload_json = 2;
+  double budget_usd = 3;
+}
+
+// Response acknowledging job enqueue.
+message EnqueueResponse {
+  string job_id = 1;
+  string status = 2;
+}
+
+// Identification and capacity metadata announced by a worker during lease streaming.
+message WorkerIdentity {
+  string worker_id = 1;
+  repeated string capabilities = 2;
+  int32 max_concurrency = 3;
+}
+
+// Dispatched job lease assigned to a worker.
+message JobLease {
+  string job_id = 1;
+  string tenant_id = 2;
+  string payload_json = 3;
+  // attempt_id serves as the monotonic fencing token preventing split-brain execution
+  int64 attempt_id = 4;
+}
+
+// Periodic heartbeat sent by workers to keep the lease active.
+message HeartbeatRequest {
+  string job_id = 1;
+  int64 attempt_id = 2;
+  string worker_id = 3;
+}
+
+// Response indicating lease validity. If lease_valid is false, worker must immediately abort execution.
+message HeartbeatResponse {
+  bool lease_valid = 1;
+}
+
+// Acknowledge successful job completion.
+message AckRequest {
+  string job_id = 1;
+  int64 attempt_id = 2;
+  string result_json = 3;
+}
+
+// Response confirming job completion acknowledgement.
+message AckResponse {
+  bool success = 1;
+}
+
+// Negative acknowledge indicating job failure or inability to execute.
+message NackRequest {
+  string job_id = 1;
+  int64 attempt_id = 2;
+  string error_message = 3;
+  bool retryable = 4;
+}
+
+// Response confirming nack processing.
+message NackResponse {
+  bool success = 1;
+}

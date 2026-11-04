@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# Exclude automatically generated protobuf / gRPC code from linting
+exclude = [
+    "app/pb/*",
+    "**/pb/*",
+    "*_pb2.py",
+    "*_pb2_grpc.py"
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]

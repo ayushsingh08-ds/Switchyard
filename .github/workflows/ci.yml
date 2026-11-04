@@ -16,6 +16,7 @@ jobs:
       broker: ${{ steps.changes.outputs.broker }}
       python: ${{ steps.changes.outputs.python }}
       ui: ${{ steps.changes.outputs.ui }}
+      db: ${{ steps.changes.outputs.db }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,11 +29,17 @@ jobs:
           filters: |
             broker:
               - 'services/broker/**'
+              - 'proto/**'
             python:
               - 'services/worker/**'
               - 'services/mcp-servers/**'
+              - 'proto/**'
+              - 'pyproject.toml'
             ui:
               - 'ui/**'
+            db:
+              - 'migrations/**'
+              - 'docker-compose.yml'
 
   broker:
     name: Broker (Go)
@@ -69,13 +76,38 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff pytest
+          pip install ruff pytest grpcio protobuf
 
       - name: Lint with Ruff
         run: ruff check services/worker services/mcp-servers
 
       - name: Test with Pytest
+        env:
+          PYTHONPATH: services/worker
         run: pytest services/worker services/mcp-servers
+
+  db:
+    name: Database Migrations (Postgres + pgvector)
+    needs: filter
+    if: ${{ needs.filter.outputs.db == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start PostgreSQL with pgvector
+        run: |
+          docker compose up -d postgres
+          echo "Waiting for postgres to become healthy..."
+          timeout 30 sh -c 'until docker compose exec -T postgres pg_isready -U postgres -d switchyard; do sleep 1; done'
+
+      - name: Apply SQL Migrations
+        run: |
+          for f in $(ls migrations/*.sql | sort); do
+            echo "Applying $f..."
+            docker compose exec -T postgres psql -U postgres -d switchyard -v ON_ERROR_STOP=1 < "$f"
+          done
+          echo "All migrations applied successfully!"
 
   ui:
     name: UI (Node)
