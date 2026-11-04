@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   filter:
@@ -76,7 +77,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff pytest grpcio protobuf
+          pip install ruff pytest pytest-asyncio grpcio protobuf fastapi httpx psycopg2-binary
 
       - name: Lint with Ruff
         run: ruff check services/worker services/mcp-servers
