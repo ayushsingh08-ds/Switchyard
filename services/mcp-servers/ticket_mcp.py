@@ -14,7 +14,12 @@ def get_redis_client() -> redis.Redis | None:
     """Return configured Redis client or None if Redis is unreachable."""
     try:
         url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        client = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=0.2, socket_timeout=0.5)
+        client = redis.Redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.5,
+        )
         client.ping()
         return client
     except Exception:
