@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from app.checkpointer import StaleLeaseFencingError
+from app.telemetry import record_llm_metrics
 
 
 class BudgetExceededError(Exception):
@@ -140,9 +141,9 @@ class GatewayChatOpenAI(ChatOpenAI):
       2. Budget check: Verifies spent_usd < budget_usd before execution; halts with
          BUDGET_EXCEEDED status if exceeded.
       3. Header injection: Injects X-Switchyard-Job-Id, X-Switchyard-Tenant-Id,
-         X-Switchyard-Attempt-Id, and X-Task-Difficulty ('low' | 'high').
-      4. Cost accounting: Logs tokens_in, tokens_out, model, cache hit, and cost to
-         cost_ledger and increments jobs.spent_usd.
+         X-Switchyard-Attempt-Id, and X-Task-Difficulty ('low' | 'high'), plus W3C traceparent.
+      4. Cost accounting & telemetry: Logs tokens_in, tokens_out, model, cache hit, and cost to
+         cost_ledger, increments jobs.spent_usd, and updates Prometheus counters.
     """
 
     db: Any = None
@@ -175,7 +176,7 @@ class GatewayChatOpenAI(ChatOpenAI):
         difficulty: str | None = None,
         step_name: str | None = None,
     ) -> dict[str, Any]:
-        """Extract job_id, tenant_id, attempt_id, difficulty, and step_name."""
+        """Extract job_id, tenant_id, attempt_id, difficulty, step_name, and traceparent."""
         configurable = (config or {}).get("configurable", {})
         job_id = configurable.get("job_id") or configurable.get("thread_id")
         tenant_id = configurable.get("tenant_id", "default")
@@ -186,6 +187,7 @@ class GatewayChatOpenAI(ChatOpenAI):
             or self.default_difficulty
         )
         effective_step = step_name or configurable.get("step_name") or self.step_name
+        traceparent = configurable.get("traceparent")
 
         return {
             "job_id": job_id,
@@ -193,6 +195,7 @@ class GatewayChatOpenAI(ChatOpenAI):
             "attempt_id": int(attempt_id),
             "difficulty": task_difficulty,
             "step_name": effective_step,
+            "traceparent": traceparent,
         }
 
     def _pre_execution_checks(self, ctx: dict[str, Any]) -> None:
@@ -262,6 +265,12 @@ class GatewayChatOpenAI(ChatOpenAI):
             latency_ms=latency_ms,
         )
         self.db.update_job_spent_usd(job_id, cost_usd)
+        record_llm_metrics(
+            model=model_name,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+        )
 
         # Check if this call pushed the job over budget
         job = self.db.get_job(job_id)
@@ -285,6 +294,8 @@ class GatewayChatOpenAI(ChatOpenAI):
         if ctx.get("attempt_id") is not None:
             headers["X-Switchyard-Attempt-Id"] = str(ctx["attempt_id"])
         headers["X-Task-Difficulty"] = str(ctx.get("difficulty", "low"))
+        if ctx.get("traceparent"):
+            headers["traceparent"] = str(ctx["traceparent"])
         return headers
 
     def invoke(

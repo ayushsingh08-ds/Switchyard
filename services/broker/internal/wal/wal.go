@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"time"
+	"github.com/switchyard/services/broker/internal/telemetry"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -129,7 +131,10 @@ func (w *WAL) Write(eventType EventType, payload []byte) error {
 	}
 
 	// Guarantee crash-safety via fsync
-	if err := w.activeFile.Sync(); err != nil {
+	startSync := time.Now()
+	err = w.activeFile.Sync()
+	telemetry.WALFsyncDurationSeconds.Observe(time.Since(startSync).Seconds())
+	if err != nil {
 		return fmt.Errorf("failed syncing wal file: %w", err)
 	}
 
