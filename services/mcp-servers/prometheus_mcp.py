@@ -15,7 +15,7 @@ def query_metrics(service_name: str, window_minutes: int = 5) -> dict[str, Any]:
     """
     query = f'rate(http_requests_total{{service="{service_name}"}}[{window_minutes}m])'
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=httpx.Timeout(0.5, connect=0.2)) as client:
             resp = client.get(
                 f"{PROMETHEUS_URL}/api/v1/query",
                 params={"query": query},
