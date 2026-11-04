@@ -1,0 +1,22 @@
+{
+  "job_id": "bench-job-crash-test",
+  "total_nodes": 8,
+  "crash_step": 6,
+  "recovery_latency_ms": 1.09,
+  "tokens_saved": 750,
+  "total_tokens_spent": 1200,
+  "steps_attempt_1": [
+    "step_1",
+    "step_2",
+    "step_3",
+    "step_4",
+    "step_5"
+  ],
+  "steps_attempt_2": [
+    "step_6",
+    "step_7",
+    "step_8"
+  ],
+  "status": "PASSED",
+  "timestamp": 1793793284.463907
+}
