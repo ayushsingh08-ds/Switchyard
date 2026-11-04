@@ -126,4 +126,6 @@ jobs:
 
       - name: Build UI
         working-directory: ui
-        run: npm run build
+        run: |
+          npm ci
+          npm run build

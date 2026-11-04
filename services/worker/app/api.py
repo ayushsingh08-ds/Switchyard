@@ -1,5 +1,6 @@
-"""FastAPI Ingestion and Query Service for Switchyard Jobs with W3C Traceparent & Metrics."""
+"""FastAPI Ingestion and Query Service for Switchyard Jobs with W3C Traceparent, SSE & Live Demo."""
 
+import asyncio
 import json
 import os
 import uuid
@@ -7,6 +8,7 @@ from typing import Any
 
 import grpc
 from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import db
@@ -21,6 +23,10 @@ app = FastAPI(title="Switchyard Ingestion API", version="0.1.0")
 
 # In-memory store fallback when Postgres is not directly available (e.g. lightweight testing)
 _in_memory_jobs: dict[str, dict[str, Any]] = {}
+_in_memory_steps: dict[str, list[dict[str, Any]]] = {}
+_in_memory_ledger: dict[str, list[dict[str, Any]]] = {}
+_active_worker_pids: dict[str, int] = {}
+_simulated_killed_workers: set[str] = set()
 
 
 class JobCreateRequest(BaseModel):
@@ -37,6 +43,11 @@ class JobResponse(BaseModel):
     budget_usd: float
     payload: dict[str, Any] | None = None
     traceparent: str | None = None
+
+
+class KillWorkerRequest(BaseModel):
+    job_id: str = Field(..., description="Job identifier")
+    attempt_id: int = Field(default=1, description="Active attempt token to kill")
 
 
 def get_broker_client() -> broker_pb2_grpc.BrokerServiceStub:
@@ -82,6 +93,7 @@ async def create_job(
             "status": "pending",
             "attempt_id": 0,
             "budget_usd": req.budget_usd,
+            "spent_usd": 0.0,
             "payload": req.payload,
         }
         _in_memory_jobs[job_id] = job_data
@@ -100,7 +112,6 @@ async def create_job(
         # 1-second timeout to avoid blocking if broker is in mock mode
         client.EnqueueJob(grpc_req, metadata=metadata, timeout=1.0)
     except Exception:
-        # Broker notification logged; job remains queued in database
         pass
 
     return JobResponse(
@@ -144,4 +155,145 @@ async def get_job_by_id(job_id: str):
         budget_usd=float(job.get("budget_usd", 0.0)),
         payload=payload,
         traceparent=job.get("traceparent"),
+    )
+
+
+@app.post("/api/v1/demo/kill-worker")
+async def kill_worker_endpoint(req: KillWorkerRequest):
+    """
+    Simulate worker crash (SIGKILL):
+    Marks the active attempt as killed, preventing further heartbeats and triggering
+    lease expiry in the broker so a second worker takes over.
+    """
+    key = f"{req.job_id}:{req.attempt_id}"
+    _simulated_killed_workers.add(key)
+
+    # If an actual process PID is registered for this worker attempt, send SIGKILL
+    pid = _active_worker_pids.get(key)
+    if pid:
+        try:
+            import signal
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    return {
+        "status": "killed",
+        "detail": f"Worker attempt #{req.attempt_id} for job {req.job_id} terminated with SIGKILL",
+        "job_id": req.job_id,
+        "attempt_id": req.attempt_id,
+    }
+
+
+@app.get("/api/v1/jobs/{job_id}/events")
+async def job_events_stream(job_id: str):
+    """
+    Server-Sent Events (SSE) stream broadcasting:
+    - Initial job snapshot
+    - Live step progress (step_name, attempt_id, latency_ms)
+    - Cost ledger events (model, tokens, cost_usd)
+    - Terminal status transitions (completed / failed)
+    """
+
+    async def event_generator():
+        last_seen_steps_count = 0
+        last_seen_ledger_count = 0
+        last_status = None
+
+        # Send initial snapshot event
+        job: dict[str, Any] | None = None
+        try:
+            job = db.get_job(job_id)
+        except Exception:
+            job = _in_memory_jobs.get(job_id)
+
+        if not job:
+            job = _in_memory_jobs.get(job_id)
+
+        if job:
+            last_status = job.get("status")
+            steps: list[dict[str, Any]] = []
+            ledger: list[dict[str, Any]] = []
+            try:
+                steps = db.get_job_steps(job_id)
+                ledger = db.get_job_ledger(job_id)
+            except Exception:
+                steps = _in_memory_steps.get(job_id, [])
+                ledger = _in_memory_ledger.get(job_id, [])
+
+            last_seen_steps_count = len(steps)
+            last_seen_ledger_count = len(ledger)
+
+            snapshot_data = {
+                "type": "snapshot",
+                "job": {
+                    "id": str(job["id"]),
+                    "tenant_id": str(job["tenant_id"]),
+                    "status": str(job.get("status", "pending")),
+                    "attempt_id": int(job.get("attempt_id", 0)),
+                    "budget_usd": float(job.get("budget_usd", 1.0)),
+                    "spent_usd": float(job.get("spent_usd", 0.0)),
+                    "steps": steps,
+                    "ledger": ledger,
+                },
+            }
+            yield f"data: {json.dumps(snapshot_data, default=str)}\n\n"
+
+        # Poll database / memory for incremental updates every 300ms
+        for _ in range(120):  # Run for up to 36 seconds
+            await asyncio.sleep(0.3)
+
+            current_job = None
+            try:
+                current_job = db.get_job(job_id)
+            except Exception:
+                current_job = _in_memory_jobs.get(job_id)
+
+            if not current_job:
+                current_job = _in_memory_jobs.get(job_id)
+
+            if not current_job:
+                continue
+
+            # Check status change
+            cur_status = current_job.get("status")
+            if cur_status != last_status:
+                last_status = cur_status
+                yield f"data: {json.dumps({'type': 'status', 'status': cur_status})}\n\n"
+
+            # Check new steps
+            steps: list[dict[str, Any]] = []
+            try:
+                steps = db.get_job_steps(job_id)
+            except Exception:
+                steps = _in_memory_steps.get(job_id, [])
+
+            if len(steps) > last_seen_steps_count:
+                for s in steps[last_seen_steps_count:]:
+                    yield f"data: {json.dumps({'type': 'step', 'step': s}, default=str)}\n\n"
+                last_seen_steps_count = len(steps)
+
+            # Check new ledger entries
+            ledger: list[dict[str, Any]] = []
+            try:
+                ledger = db.get_job_ledger(job_id)
+            except Exception:
+                ledger = _in_memory_ledger.get(job_id, [])
+
+            if len(ledger) > last_seen_ledger_count:
+                for e in ledger[last_seen_ledger_count:]:
+                    yield f"data: {json.dumps({'type': 'ledger', 'entry': e}, default=str)}\n\n"
+                last_seen_ledger_count = len(ledger)
+
+            if cur_status in ("completed", "failed", "dlq", "budget_exceeded"):
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

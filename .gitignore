@@ -30,3 +30,8 @@ ENV/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Node / UI
+node_modules/
+ui/dist/
+.vite/
