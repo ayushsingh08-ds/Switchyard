@@ -44,6 +44,23 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
 
+  # External LLM Gateway container for difficulty routing, caching, and budget tracking
+  gateway:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: switchyard-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/switchyard
+      - REDIS_URL=redis://redis:6379/0
+      - STORE_MODEL_IN_DB=True
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
